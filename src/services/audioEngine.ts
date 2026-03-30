@@ -77,7 +77,11 @@ class AudioEngine {
     return this.audioCtx?.currentTime || 0;
   }
 
-  playKick(time: number) {
+  getAudioContext() {
+    return this.audioCtx;
+  }
+
+  playKick(time: number, volume: number = 1) {
     if (!this.audioCtx || !this.masterGain) return;
     const osc = this.audioCtx.createOscillator();
     const gainNode = this.audioCtx.createGain();
@@ -87,14 +91,14 @@ class AudioEngine {
     osc.frequency.setValueAtTime(150, time);
     osc.frequency.exponentialRampToValueAtTime(0.001, time + 0.5);
 
-    gainNode.gain.setValueAtTime(1, time);
+    gainNode.gain.setValueAtTime(volume, time);
     gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.5);
 
     osc.start(time);
     osc.stop(time + 0.5);
   }
 
-  playSnare(time: number) {
+  playSnare(time: number, volume: number = 1) {
     if (!this.audioCtx || !this.masterGain) return;
     // Tone
     const osc = this.audioCtx.createOscillator();
@@ -104,7 +108,7 @@ class AudioEngine {
     oscGain.connect(this.masterGain);
     
     osc.frequency.setValueAtTime(250, time);
-    oscGain.gain.setValueAtTime(0.5, time);
+    oscGain.gain.setValueAtTime(0.5 * volume, time);
     oscGain.gain.exponentialRampToValueAtTime(0.01, time + 0.2);
     osc.start(time);
     osc.stop(time + 0.2);
@@ -122,13 +126,13 @@ class AudioEngine {
     noiseFilter.connect(noiseGain);
     noiseGain.connect(this.masterGain);
 
-    noiseGain.gain.setValueAtTime(1, time);
+    noiseGain.gain.setValueAtTime(volume, time);
     noiseGain.gain.exponentialRampToValueAtTime(0.01, time + 0.2);
     noiseSource.start(time);
     noiseSource.stop(time + 0.2);
   }
 
-  playHiHat(time: number) {
+  playHiHat(time: number, volume: number = 1) {
     if (!this.audioCtx || !this.noiseBuffer || !this.masterGain) return;
     const noiseSource = this.audioCtx.createBufferSource();
     noiseSource.buffer = this.noiseBuffer;
@@ -141,42 +145,172 @@ class AudioEngine {
     noiseFilter.connect(gainNode);
     gainNode.connect(this.masterGain);
 
-    gainNode.gain.setValueAtTime(0.3, time);
+    gainNode.gain.setValueAtTime(0.3 * volume, time);
     gainNode.gain.exponentialRampToValueAtTime(0.01, time + 0.05);
     noiseSource.start(time);
     noiseSource.stop(time + 0.05);
   }
 
-  playSynth(time: number) {
+  playSynth(time: number, frequency: number | string = 440, volume: number = 1, mode: 'chord' | 'arpeggio' | 'note' = 'chord', brightness: number = 0.5) {
+    if (!this.audioCtx || !this.masterGain) return;
+    
+    // Ensure context is running
+    if (this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume();
+    }
+
+    const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    
+    const getFreq = (noteName: string): number => {
+      const match = noteName.match(/^([A-G]#?)(\d)$/);
+      if (!match) return 440;
+      const name = match[1];
+      const octave = parseInt(match[2]);
+      const index = NOTE_NAMES.indexOf(name);
+      const midi = (octave + 1) * 12 + index;
+      return 440 * Math.pow(2, (midi - 69) / 12);
+    };
+
+    const getChordFrequencies = (root: string): number[] => {
+      const match = root.match(/^([A-G]#?)(\d)$/);
+      if (!match) return [440];
+      const name = match[1];
+      const octave = parseInt(match[2]);
+      const keyIndex = NOTE_NAMES.indexOf(name);
+      
+      const isDiatonic = !name.includes('#');
+      
+      if (isDiatonic) {
+        // Diatonic triads in C Major
+        const scale = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+        const rootIdx = scale.indexOf(name);
+        // 1st, 3rd, 5th in scale
+        const notes = [
+          root,
+          scale[(rootIdx + 2) % 7] + (octave + (rootIdx + 2 >= 7 ? 1 : 0)),
+          scale[(rootIdx + 4) % 7] + (octave + (rootIdx + 4 >= 7 ? 1 : 0))
+        ];
+        return notes.map(getFreq);
+      } else {
+        // Major triad for accidentals
+        return [0, 4, 7].map(interval => {
+          const midi = (octave + 1) * 12 + keyIndex + interval;
+          return 440 * Math.pow(2, (midi - 69) / 12);
+        });
+      }
+    };
+
+    let frequencies: number[] = [];
+    if (typeof frequency === 'string') {
+      if (mode === 'note') {
+        frequencies = [getFreq(frequency)];
+      } else {
+        frequencies = getChordFrequencies(frequency);
+      }
+    } else {
+      frequencies = [frequency];
+    }
+
+    if (mode === 'chord' || mode === 'note') {
+      frequencies.forEach(freq => {
+        // Use triangle for single notes (softer), sawtooth for chords (richer)
+        const type = mode === 'note' ? 'triangle' : 'sawtooth';
+        this.playSingleSynthNote(time, freq, volume / (mode === 'chord' ? frequencies.length : 1), false, type, brightness);
+      });
+    } else {
+      // Arpeggio
+      const arpSpeed = 0.04;
+      frequencies.forEach((freq, i) => {
+        this.playSingleSynthNote(time + i * arpSpeed, freq, volume * 1.2, true, 'sawtooth', brightness);
+      });
+    }
+  }
+
+  private playSingleSynthNote(time: number, freq: number, volume: number, isArp: boolean, type: OscillatorType = 'sawtooth', brightness: number = 0.5) {
     if (!this.audioCtx || !this.masterGain) return;
     const osc = this.audioCtx.createOscillator();
     const gainNode = this.audioCtx.createGain();
     const filter = this.audioCtx.createBiquadFilter();
 
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(440, time); // A4
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, time);
+    
+    // Brightness controls filter cutoff
+    const baseCutoff = isArp ? 5000 : 3000;
+    const cutoff = baseCutoff * (0.2 + brightness * 2); // 0.2 to 2.2x base
     
     filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(2000, time);
-    filter.frequency.exponentialRampToValueAtTime(100, time + 0.2);
+    filter.frequency.setValueAtTime(cutoff, time);
+    filter.frequency.exponentialRampToValueAtTime(cutoff * 0.1, time + 0.4);
+    filter.Q.setValueAtTime(brightness * 15, time); // Increased resonance for "noisier" feel
 
     osc.connect(filter);
+    
+    // Add noise layer if brightness is high
+    if (brightness > 0.6 && this.noiseBuffer) {
+      const noise = this.audioCtx.createBufferSource();
+      noise.buffer = this.noiseBuffer;
+      const noiseGain = this.audioCtx.createGain();
+      const noiseFilter = this.audioCtx.createBiquadFilter();
+      
+      noiseFilter.type = 'bandpass';
+      noiseFilter.frequency.setValueAtTime(freq * 2, time);
+      
+      noiseGain.gain.setValueAtTime(0, time);
+      noiseGain.gain.linearRampToValueAtTime((brightness - 0.6) * 0.1 * volume, time + 0.01);
+      noiseGain.gain.exponentialRampToValueAtTime(0.001, time + 0.2);
+      
+      noise.connect(noiseFilter);
+      noiseFilter.connect(noiseGain);
+      noiseGain.connect(gainNode);
+      noise.start(time);
+      noise.stop(time + 0.2);
+    }
+
     filter.connect(gainNode);
     gainNode.connect(this.masterGain);
 
-    gainNode.gain.setValueAtTime(0.2, time);
-    gainNode.gain.linearRampToValueAtTime(0, time + 0.2);
+    // Snappier envelope for better reactivity
+    gainNode.gain.setValueAtTime(0, time);
+    gainNode.gain.linearRampToValueAtTime(0.2 * volume, time + 0.005);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.4);
 
     osc.start(time);
-    osc.stop(time + 0.2);
+    osc.stop(time + 0.4);
   }
 
-  getInstruments() {
+  playPing(time: number, frequency: number = 880, volume: number = 0.5) {
+    if (!this.audioCtx || !this.masterGain) return;
+    
+    // Ensure context is running
+    if (this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume();
+    }
+
+    const osc = this.audioCtx.createOscillator();
+    const gainNode = this.audioCtx.createGain();
+    
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(frequency, time);
+    osc.frequency.exponentialRampToValueAtTime(frequency * 0.5, time + 0.1);
+    
+    gainNode.gain.setValueAtTime(0, time);
+    gainNode.gain.linearRampToValueAtTime(volume, time + 0.01);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.1);
+    
+    osc.connect(gainNode);
+    gainNode.connect(this.masterGain);
+    
+    osc.start(time);
+    osc.stop(time + 0.1);
+  }
+
+  getInstruments(synthMode: 'chord' | 'arpeggio' = 'chord') {
     return [
-      (t: number) => this.playKick(t),
-      (t: number) => this.playSnare(t),
-      (t: number) => this.playHiHat(t),
-      (t: number) => this.playSynth(t)
+      (t: number, v: number) => this.playKick(t, v),
+      (t: number, v: number) => this.playSnare(t, v),
+      (t: number, v: number) => this.playHiHat(t, v),
+      (t: number, v: number, val?: number | string) => this.playSynth(t, val, v, synthMode)
     ];
   }
 }
